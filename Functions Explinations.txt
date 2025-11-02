@@ -37,7 +37,6 @@ autonomous_cycle()
 Picks a seed URL (Wikipedia/arXiv list), ingests it with limited link following, asks a curiosity question, stores the answer, then self-reflects on it. This is the “roaming + learn” heartbeat that /auto runs periodically.
 
 
-
 agi_core.py — thin LLM wrapper
 
 
@@ -276,42 +275,15 @@ tests/smoke.py — quick integration test
 Runs a minimal flow: imports modules, calls ingest.ingest_url on a fixed URL with low follow, runs search() and answer() once, and exits non-zero on failure. Used by the auto-improver to sanity-check patches.
 
 
-
 auto_config.py — knobs for the self-coder
 
 
 Constants the auto-coder reads: model name/URL, schedule, ALLOWED_EDIT set, BLOCKLIST set, patch size limit, RUN_TESTS, USE_GIT, STATIC_CHECK, and the optional new-info gating values ONLY_ON_NEW_MEMORIES and MEMORY_DELTA_WINDOW.
 
 
-
 README.md / requirements.txt
 
-
-README.md: project blurb + quickstart you’ve been building up.
+README.md: project blurb + quickstart 
 
 
 requirements.txt: minimal deps (requests, beautifulsoup4, numpy, scikit-learn) to make ingest + memory store work.
-
-
-
-Quick tips while you’re exploring
-
-
-See what the auto-coder tried last:
-dir .\proposals\ | sort LastWriteTime | select -last 3
-Then notepad the newest .patch or .raw.txt.
-
-
-Ask git why a patch failed:
-$p = (Get-ChildItem .\proposals\ -File | Sort LastWriteTime | Select -Last 1).FullName
-git apply --check "$p"
-
-That prints the exact “corrupt patch at line …” reason.
-
-
-Force a very specific change (great for validating the loop):
-py auto_improve.py --once --goal "Edit main.py only: add '/goodbye  Alias for /exit' under '/exit' in /help. Return a valid unified diff for main.py only."
-
-
-
-If you want, I can also generate a one-pager “System Map” (PNG or markdown) that diagrams how main → agent → ingest/memory_store → auto_improve all connect and where logs live.
