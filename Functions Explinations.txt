@@ -1,0 +1,317 @@
+agent.py — reasoning, planning, reflection, autonomous loop
+
+
+_mem_write(kind, content, meta=None)
+Appends one JSON line to store/memory_log.jsonl with a timestamp, used to persist answers/plans/reflections and auto-loop events.
+
+
+_mem_read(kind=None, limit=20)
+Reads the memory log, optionally filters by kind (e.g., "answer"/"plan"/"reflection"), returns most recent entries.
+
+
+_try_ollama(system, user, ctx_items)
+Calls your local Ollama chat endpoint with a composed prompt (system+context+user) and returns the model’s text.
+
+
+_fallback_answer(question, ctx_items)
+If the LLM call fails, builds a short reply from the top retrieved context snippets.
+
+
+answer(question)
+Retrieves context via memory_store.search(), asks the LLM (or falls back), then records the result into memory via add_chunks and _mem_write. Returns the model’s answer.
+
+
+plan(goal)
+Generates a short 5-step plan (via LLM with context fallback), logs to memory store and memory log.
+
+
+reflect(text)
+Asks the LLM to critique the provided text (accuracy, assumptions, next steps), logs reflection in memory, and returns it (your current variant also computes a confidence score if you used the extended agent).
+
+
+history(kind=None)
+Pretty-prints recent memory log entries for quick human inspection.
+
+
+autonomous_cycle()
+Picks a seed URL (Wikipedia/arXiv list), ingests it with limited link following, asks a curiosity question, stores the answer, then self-reflects on it. This is the “roaming + learn” heartbeat that /auto runs periodically.
+
+
+
+agi_core.py — thin LLM wrapper
+
+
+ask_llm(messages, model=None, url=None, timeout=60)
+Minimal helper to send an arbitrary chat message list to Ollama and return the model’s text. (You’re mostly using the agent’s own _try_ollama, but this is here as a general utility.)
+
+
+
+auto_improve.py — self-coding loop (the “auto-coder”)
+
+
+_now_iso()
+UTC timestamp string for logs/metadata.
+
+
+_status(msg)
+Logs a message to auto_logs/auto_improve.log and prints it.
+
+
+_run(cmd, cwd=ROOT)
+Runs a subprocess, captures output (no shell), used for git/patch/tests.
+
+
+git_available()
+True if USE_GIT is enabled and git --version succeeds.
+
+
+git_init_if_needed()
+Initializes a new repo and commits a “baseline” if there isn’t a .git folder yet.
+
+
+snapshot_backup() / restore_snapshot(snap)
+No-git fallback: copy the working tree to _backup_<ts> and restore it on failure.
+
+
+_read_text(path, limit) / _tail_lines(path, n)
+File helpers (bounded reads, tail lines) for collecting context and scanning memory logs.
+
+
+_latest_memory_ts(window) / _load_last_applied_ts() / _store_last_applied_ts(ts)
+Implements the “ONLY_ON_NEW_MEMORIES” gating: tracks the newest memory timestamp and the last patch time.
+
+
+_collect_code_context()
+Reads the first ~8000 chars of each file listed in ALLOWED_EDIT to give the model enough code to propose diffs.
+
+
+_collect_recent_proposals(k=3)
+Includes the last few proposals/*.json summaries in the context (so the model can see what we changed recently).
+
+
+_collect_agent_memories(k=12)
+Injects a compact view of recent answers/reflections and recent ingested URLs (from store/memory_log.jsonl and store/meta.jsonl) so patches can align with fresh behavior/failures.
+
+
+collect_context()
+Concatenates code + recent proposals + recent agent memories for the LLM.
+
+
+_ollama_chat(messages, timeout_s=180, max_retries=3)
+Robust Ollama call with retries/backoff.
+
+
+ask_ollama(goal, context)
+Builds the “produce a unified diff of these files” prompt and asks the code model.
+
+
+_extract_first_unified_diff(text)
+Pulls the first valid unified diff out of whatever the model emitted (supports ```diff fences or raw diffs).
+
+
+_write_attempt(text, kind)
+Saves either a .patch or a .raw.txt in proposals/ for auditing.
+
+
+_paths_from_diff_headers(patch_text) / _is_safe_basename(name) / patch_touches_only_allowed(patch_text)
+Parses the diff headers and ensures only allowed basenames are modified and nothing from the blocklist appears.
+
+
+_git_apply_check(patch_path) / apply_patch(patch_path)
+Dry-runs and then applies the patch via git; commits the result. (Falls back to patch tool if no git.)
+
+
+run_static_check()
+Executes STATIC_CHECK (e.g., py -m pyflakes), returns True/False.
+
+
+run_smoke_tests()
+Runs tests/smoke.py (if enabled), returns True/False.
+
+
+revert_last_commit()
+git reset --hard HEAD~1 to rollback on failure (or snapshot restore if no git).
+
+
+cycle(goal)
+One end-to-end “auto coder” iteration: (optionally) wait for new memories, collect context, ask model for a diff, validate/sanitize/limit it, apply, run checks/tests, on success write a JSON summary in proposals/ and advance the last-applied memory timestamp.
+
+
+_parse_cli(argv) (present in your newer version)
+Allows --once and a custom --goal from the command line.
+
+
+main()
+Initializes git baseline (if needed), prints config, then loops every CYCLE_SECONDS calling cycle(goal); or runs a single --once cycle.
+
+
+
+ingest.py — web fetch, parse, chunk (+ optional SAFE_MODE)
+
+
+_rate(url)
+Per-host throttle: caps total requests/minute to avoid hammering a site.
+
+
+_strip(s)
+Whitespace normalizer used everywhere.
+
+
+_chunk(text, n=MAX_LEN)
+Splits long page text into sentence-friendly chunks up to MAX_LEN chars for vectorizing.
+
+
+_llm_is_safe(host) (in your LLM-gated version)
+Asks your Ollama model “SAFE/UNSAFE?” for a domain and caches for a few hours to decide if it’s OK to crawl. (When disabled, you may instead have SAFE_MODE + explicit allowlist/denylist.)
+
+
+_allowed(url) / _allowed_by_llm(url)
+Domain gate: either a simple allowlist (SAFE_MODE) or the LLM-safety classifier.
+
+
+fetch(url)
+GETs a page (polite UA + timeout), strips <script/style/nav/footer/header>, returns (title, visible_text, raw_html).
+
+
+links(base_url, html)
+Extracts absolute HTTP(S) links from a page, deduped and filtered by the safety rule.
+
+
+ingest_url(url, follow=0)
+Fetches the root URL, chunks text into the vector store, then follows up to follow links and adds those too. Returns how many pages were processed.
+
+
+
+main.py — interactive console + non-blocking autonomous mode
+
+
+_log(line) / _out() / _err() / _ok()
+Print + append to logs/session_*.log.
+
+
+_safe_supported() / _safe_get() / _safe_set(val)
+Introspects and toggles ingest.SAFE_MODE (if your current ingest has it).
+
+
+_auto_loop(interval_min) / start_auto(interval_min=30) / stop_auto()
+Runs agent.autonomous_cycle() on a background thread every N minutes; start/stop cleanly.
+
+
+_parse_ingest_args(args) / _validate_url(u)
+CLI parsing helpers for /ingest.
+
+
+_human_size(path)
+Quick file size prettifier for /status.
+
+
+_status()
+Displays store files status (presence + sizes), SAFE_MODE, transcript path.
+
+
+_versions()
+Shows Python/platform and Ollama env values.
+
+
+_show_help()
+Prints all slash-commands and their usage.
+
+
+_config()
+Shows important paths (cwd, store, log, session log).
+
+
+_clear()
+Clears the console screen.
+
+
+main()
+Prints banner, REPL loop reading commands and dispatching to the agent/ingest/autonomous functions. Exits with “end of line”.
+
+
+
+memory_store.py — simple local RAG store (vector encoding + search)
+
+
+_encode(text_chunks)
+HashingVectorizer fit/transform on text chunks (sparse vectors) suitable for cosine similarity.
+
+
+_load_embeddings() / _save_embeddings(vecs, metas)
+Read/write store/embeddings.npy and store/meta.jsonl.
+
+
+_append_embeddings(new_vecs, new_metas)
+Concatenate new embeddings + metadata to the store and persist.
+
+
+_cosine_sim(q_vec, X)
+Cosine similarity between the query vector and all chunk vectors.
+
+
+_load_jsonl(path)
+Utility to read JSONL files (used by recall helpers).
+
+
+add_chunks(chunks, meta)
+Ingests a list of text chunks with a meta dict (e.g., {url, title, source}) into the embeddings store.
+
+
+search(query, k=5)
+Encodes the query, finds top-k similar chunks, returns a list of {title, url, snippet, score} dicts.
+
+
+remember(kind, text, url=None, title=None)
+Convenience to add small text items (answers, reflections) as searchable chunks.
+
+
+recall_mem(kind=None, k=10)
+Pulls recent memory entries (from memory log JSONL) with optional kind filter.
+
+
+
+tests/smoke.py — quick integration test
+
+
+Runs a minimal flow: imports modules, calls ingest.ingest_url on a fixed URL with low follow, runs search() and answer() once, and exits non-zero on failure. Used by the auto-improver to sanity-check patches.
+
+
+
+auto_config.py — knobs for the self-coder
+
+
+Constants the auto-coder reads: model name/URL, schedule, ALLOWED_EDIT set, BLOCKLIST set, patch size limit, RUN_TESTS, USE_GIT, STATIC_CHECK, and the optional new-info gating values ONLY_ON_NEW_MEMORIES and MEMORY_DELTA_WINDOW.
+
+
+
+README.md / requirements.txt
+
+
+README.md: project blurb + quickstart you’ve been building up.
+
+
+requirements.txt: minimal deps (requests, beautifulsoup4, numpy, scikit-learn) to make ingest + memory store work.
+
+
+
+Quick tips while you’re exploring
+
+
+See what the auto-coder tried last:
+dir .\proposals\ | sort LastWriteTime | select -last 3
+Then notepad the newest .patch or .raw.txt.
+
+
+Ask git why a patch failed:
+$p = (Get-ChildItem .\proposals\ -File | Sort LastWriteTime | Select -Last 1).FullName
+git apply --check "$p"
+
+That prints the exact “corrupt patch at line …” reason.
+
+
+Force a very specific change (great for validating the loop):
+py auto_improve.py --once --goal "Edit main.py only: add '/goodbye  Alias for /exit' under '/exit' in /help. Return a valid unified diff for main.py only."
+
+
+
+If you want, I can also generate a one-pager “System Map” (PNG or markdown) that diagrams how main → agent → ingest/memory_store → auto_improve all connect and where logs live.
