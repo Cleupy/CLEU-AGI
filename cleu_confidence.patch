@@ -1,0 +1,102 @@
+--- a/agent.py
++++ b/agent.py
+@@ -1,7 +1,10 @@
+-# agent.py — CLEU-AGI reasoning, planning, reflection, autonomous loop (clean + free roam)
+-import os, time, json, traceback, random
++# agent.py — CLEU-AGI reasoning, planning, reflection, autonomous loop (clean + free roam)
++import os, time, json, traceback, random, re, math
+ from typing import List, Dict, Any
+ 
+@@
+ SYSTEM_POLICY = (
+     "You are CLEU-AGI: careful, factual, concise. Prefer grounded citations. "
+     "If unknown, say so and suggest reputable next sources to learn from."
+ )
+ 
++# === Confidence utilities ===
++_HEDGE_WORDS = {"might","may","could","possibly","perhaps","appears","suggests","seems","likely","unclear"}
++def _count_citations(text: str) -> int:
++    if not isinstance(text, str): return 0
++    # crude: count http/https or bracketed [1], (doi…), etc.
++    hits = re.findall(r"(https?://|doi:|\\b\\[\\d+\\]|\\(\\d{4}\\))", text, flags=re.I)
++    return len(hits)
++
++def _keyword_set(s: str) -> set:
++    if not isinstance(s, str): return set()
++    toks = re.findall(r"[a-zA-Z0-9_]+", s.lower())
++    # drop tiny words
++    return {t for t in toks if len(t) >= 3}
++
++def _overlap(a: str, b: str) -> float:
++    A, B = _keyword_set(a), _keyword_set(b)
++    if not A or not B: return 0.0
++    inter = len(A & B)
++    denom = max(1, min(len(A), len(B)))
++    return inter / denom
++
++def _confidence_score(answer_text: str, ctx_items: List[Dict[str,Any]]) -> float:
++    """
++    Heuristic confidence in [0..1]:
++      - citations bonus (up to 0.4)
++      - context agreement overlap (up to 0.4)
++      - hedging penalty (down to -0.2)
++    """
++    # 1) citations
++    cits = _count_citations(answer_text)
++    cit_score = max(0.0, min(1.0, cits / 4.0)) * 0.4  # cap after ~4 cites
++
++    # 2) agreement with retrieved context
++    if ctx_items:
++        overlaps = []
++        for c in ctx_items[:6]:
++            snippet = c.get("snippet","")
++            overlaps.append(_overlap(answer_text, snippet))
++        ctx_score = (sum(overlaps)/len(overlaps)) * 0.4 if overlaps else 0.0
++    else:
++        ctx_score = 0.0
++
++    # 3) hedging penalty
++    words = _keyword_set(answer_text)
++    hedges = len([w for w in words if w in _HEDGE_WORDS])
++    hedge_pen = - min(0.2, hedges * 0.04)  # up to -0.2
++
++    raw = cit_score + ctx_score + hedge_pen
++    return float(max(0.0, min(1.0, raw)))
++
+ # === Public API for main.py ===
+ def answer(question: str) -> str:
+     ctx = search(question, 6)
+     try:
+         out = _try_ollama(SYSTEM_POLICY, question, ctx)
+@@
+     return plan_txt
+ 
+ def reflect(text: str) -> str:
+     if not text.strip():
+         return "Provide text to reflect on, e.g., /reflect My answer about X."
+-    try:
+-        refl = _try_ollama(
+-            "Critique for accuracy, missing assumptions, and safer next steps. 120 words max.",
+-            text,
+-            search(text, 4)
+-        )
+-    except Exception:
+-        refl = "Reflection: verify math rigor, double-check sources, and test small examples."
+-    add_text("local://reflection", "Reflection", refl, source="reflection")
+-    _mem_write("reflection", refl, {"about": text[:100]})
+-    return refl
++    # Retrieve some local context to let both LLM and our confidence use it
++    ctx_items = search(text, 6)
++    try:
++        refl = _try_ollama(
++            "Critique for accuracy, missing assumptions, and safer next steps. 120 words max.",
++            text,
++            ctx_items
++        )
++    except Exception:
++        refl = "Reflection: verify math rigor, double-check sources, and test small examples."
++    # Compute heuristic confidence from reflection content + context
++    conf = _confidence_score(refl, ctx_items)
++    add_text("local://reflection", "Reflection", refl, source="reflection")
++    _mem_write("reflection", refl, {"about": text[:100], "confidence": conf})
++    return f"{refl}\n\n[confidence: {conf:.2f}]"
